@@ -1,0 +1,25 @@
+{
+  "document": {
+    "id": "example-doc-id",
+    "original_filename": "note.txt",
+    "detected_format": "text",
+    "file_size": 120,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "source_path": "originals/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_note.txt",
+    "created_at": "2026-10-26T00:00:00Z",
+    "processed_at": "2026-10-26T00:00:05Z",
+    "processing_status": "completed",
+    "extraction_status": "completed",
+    "category": "notes",
+    "summary": "Example metadata for the local archive.",
+    "metadata_json": "{\"source\": \"local-file\", \"owner\": \"user\"}"
+  },
+  "extracted_content": {
+    "id": "example-content-id",
+    "document_id": "example-doc-id",
+    "extracted_text": "Example content for a sample Second Brain record.",
+    "extraction_method": "plain_text_read",
+    "extraction_version": "0.1.0",
+    "created_at": "2026-10-26T00:00:02Z"
+  }
+}
