@@ -1,1 +1,2 @@
 # No external dependencies for MVP - uses only Python stdlib
+python-telegram-bot>=20.0

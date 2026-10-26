@@ -1,12 +1,22 @@
-"""Classification module - Layer B (semantic decisions)."""
+"""Classification module - Layer B (semantic decisions).
+
+Classification strategy (in order):
+1. LLM classification (Layer A) - if API key available
+2. Heuristic classification (filename + keywords)
+3. Fallback to 'other'
+
+The decision contract records exactly how the choice was made.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
-from .config import CATEGORIES, CATEGORY_KEYWORDS, SupportedFormats
+from .config import CATEGORIES, CATEGORY_KEYWORDS
+from .llm_client import LLMClient
 from .models import (
     ClassificationDecision,
     Document,
@@ -67,31 +77,78 @@ def _generate_summary(text: str) -> str:
     return ""
 
 
-def classify_document(
-    document: Document,
-    extracted: ExtractedContent,
-) -> tuple[ClassificationDecision, str, list[ProcessingEvent]]:
-    events: list[ProcessingEvent] = []
-    text = extracted.extracted_text
-    ext_category = _classify_by_extension(document.original_filename)
+def _heuristic_classify(
+    document: Document, text: str
+) -> tuple[str, float, list[str]]:
+    """Heuristic classification by extension + keywords."""
     criteria: list[str] = []
+    ext_category = _classify_by_extension(document.original_filename)
     if ext_category:
         criteria.append(f"extension_hint:{ext_category}")
     kw_category, kw_hits, matched_kw = _classify_by_keywords(text)
     if kw_category:
         criteria.append(f"keyword_hint:{kw_category}(hits={kw_hits})")
     if kw_hits >= _STRONG_MATCH_THRESHOLD and kw_category:
-        chosen = kw_category
-        confidence = 0.8
+        return kw_category, 0.8, criteria
     elif ext_category:
-        chosen = ext_category
-        confidence = 0.6
+        return ext_category, 0.6, criteria
     elif kw_category:
-        chosen = kw_category
-        confidence = 0.5
+        return kw_category, 0.5, criteria
     else:
-        chosen = "other"
-        confidence = 0.2
+        return "other", 0.2, criteria
+
+
+def classify_document(
+    document: Document,
+    extracted: ExtractedContent,
+    llm_client: Optional[LLMClient] = None,
+) -> tuple[ClassificationDecision, str, list[ProcessingEvent]]:
+    """Classify a document.
+
+    Tries LLM first, falls back to heuristic.
+    Returns (ClassificationDecision, summary, events).
+    """
+    events: list[ProcessingEvent] = []
+    text = extracted.extracted_text
+    method = "heuristic"
+
+    # --- Try LLM first ---
+    chosen = None
+    confidence = 0.0
+    criteria = []
+    llm_model = None
+
+    if llm_client and llm_client.is_available:
+        try:
+            llm_resp = llm_client.classify(text, list(CATEGORIES))
+            if llm_resp:
+                chosen = llm_resp.content
+                confidence = 0.9
+                method = "llm"
+                llm_model = llm_resp.model
+                criteria.append(f"llm:{llm_model}")
+                events.append(ProcessingEvent(
+                    document_id=document.id,
+                    component="classify",
+                    operation="llm_classify",
+                    status="success",
+                    sanitized_message=f"LLM: {chosen} via {llm_model}",
+                ))
+        except Exception as e:
+            logger.warning("LLM classification failed: %s", e)
+            events.append(ProcessingEvent(
+                document_id=document.id,
+                component="classify",
+                operation="llm_classify",
+                status="failed",
+                sanitized_message=f"LLM failed: {type(e).__name__}",
+            ))
+
+    # --- Fallback to heuristic ---
+    if chosen is None:
+        chosen, confidence, criteria = _heuristic_classify(document, text)
+
+    # Flag manual review for low confidence
     requires_review = confidence < 0.7
     review_reason = None
     if requires_review:
@@ -99,6 +156,8 @@ def classify_document(
             review_reason = "No strong category signal detected"
         elif confidence < 0.7:
             review_reason = "Classification based on weak signal only"
+
+    # Build decision contract
     decision = ClassificationDecision(
         document_id=document.id,
         allowed_categories=list(CATEGORIES),
@@ -108,14 +167,17 @@ def classify_document(
         requires_manual_review=requires_review,
         manual_review_reason=review_reason,
     )
+
     summary = _generate_summary(text)
+
     events.append(ProcessingEvent(
         document_id=document.id,
-        component="classify", operation="classify",
+        component="classify",
+        operation="classify",
         status="success",
         sanitized_message=(
-            f"Category: {chosen} (confidence: {confidence:.2f}, "
-            f"review: {requires_review})"
+            f"- {chosen} (confidence: {confidence:.2f}, method: {method}, review: {requires_review})"
         ),
     ))
+
     return decision, summary, events

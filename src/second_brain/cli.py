@@ -20,6 +20,7 @@ from .ingest import (
 )
 from .extract import extract_text, ExtractionError
 from .classify import classify_document
+from .llm_client import LLMClient
 from .storage import Storage, StorageError
 
 
