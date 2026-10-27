@@ -1,5 +1,3 @@
-"""Data models for Second Brain MVP."""
-
 from __future__ import annotations
 
 import json
@@ -31,6 +29,7 @@ class Document:
     extraction_status: str = "pending"
     category: Optional[str] = None
     summary: Optional[str] = None
+    action_hint: Optional[str] = None
     metadata_json: Optional[str] = None
 
     def to_dict(self) -> dict:
@@ -82,6 +81,7 @@ class ClassificationDecision:
     criteria_used: list = field(default_factory=list)
     requires_manual_review: bool = True
     manual_review_reason: Optional[str] = None
+    action_hints: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

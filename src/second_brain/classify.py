@@ -1,13 +1,3 @@
-"""Classification module - Layer B (semantic decisions).
-
-Classification strategy (in order):
-1. LLM classification (Layer A) - if API key available
-2. Heuristic classification (filename + keywords)
-3. Fallback to 'other'
-
-The decision contract records exactly how the choice was made.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -15,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .config import CATEGORIES, CATEGORY_KEYWORDS
+from .config import ACTION_SUGGESTIONS, CATEGORIES, CATEGORY_KEYWORDS
 from .llm_client import LLMClient
 from .models import (
     ClassificationDecision,
@@ -35,6 +25,11 @@ class ClassificationError(Exception):
     pass
 
 
+def suggest_action(category: str) -> list[str]:
+    category_name = category.lower()
+    return ACTION_SUGGESTIONS.get(category_name, ACTION_SUGGESTIONS["other"]).copy()
+
+
 def _classify_by_extension(filename: str) -> str | None:
     suffix = Path(filename).suffix.lower()
     ext_map = {
@@ -44,6 +39,12 @@ def _classify_by_extension(filename: str) -> str | None:
         ".log": "journal",
         ".csv": "data",
         ".txt": "notes",
+        ".json": "data",
+        ".yaml": "config",
+        ".yml": "config",
+        ".py": "code",
+        ".js": "code",
+        ".ts": "code",
     }
     return ext_map.get(suffix)
 
@@ -54,7 +55,7 @@ def _classify_by_keywords(text: str) -> tuple[str | None, int, list[str]]:
     best_hits = 0
     matched_keywords: list[str] = []
     for category, keywords in CATEGORY_KEYWORDS.items():
-        hits = []
+        hits: list[str] = []
         for kw in keywords:
             count = len(re.findall(re.escape(kw.lower()), text_lower))
             if count > 0:
@@ -77,10 +78,7 @@ def _generate_summary(text: str) -> str:
     return ""
 
 
-def _heuristic_classify(
-    document: Document, text: str
-) -> tuple[str, float, list[str]]:
-    """Heuristic classification by extension + keywords."""
+def _heuristic_classify(document: Document, text: str) -> tuple[str, float, list[str]]:
     criteria: list[str] = []
     ext_category = _classify_by_extension(document.original_filename)
     if ext_category:
@@ -90,12 +88,11 @@ def _heuristic_classify(
         criteria.append(f"keyword_hint:{kw_category}(hits={kw_hits})")
     if kw_hits >= _STRONG_MATCH_THRESHOLD and kw_category:
         return kw_category, 0.8, criteria
-    elif ext_category:
+    if ext_category:
         return ext_category, 0.6, criteria
-    elif kw_category:
+    if kw_category:
         return kw_category, 0.5, criteria
-    else:
-        return "other", 0.2, criteria
+    return "other", 0.2, criteria
 
 
 def classify_document(
@@ -103,19 +100,13 @@ def classify_document(
     extracted: ExtractedContent,
     llm_client: Optional[LLMClient] = None,
 ) -> tuple[ClassificationDecision, str, list[ProcessingEvent]]:
-    """Classify a document.
-
-    Tries LLM first, falls back to heuristic.
-    Returns (ClassificationDecision, summary, events).
-    """
     events: list[ProcessingEvent] = []
     text = extracted.extracted_text
     method = "heuristic"
 
-    # --- Try LLM first ---
     chosen = None
     confidence = 0.0
-    criteria = []
+    criteria: list[str] = []
     llm_model = None
 
     if llm_client and llm_client.is_available:
@@ -127,28 +118,31 @@ def classify_document(
                 method = "llm"
                 llm_model = llm_resp.model
                 criteria.append(f"llm:{llm_model}")
-                events.append(ProcessingEvent(
+                events.append(
+                    ProcessingEvent(
+                        document_id=document.id,
+                        component="classify",
+                        operation="llm_classify",
+                        status="success",
+                        sanitized_message=f"LLM: {chosen} via {llm_model}",
+                    )
+                )
+        except Exception as e:
+            logger.warning("LLM classification failed: %s", e)
+            events.append(
+                ProcessingEvent(
                     document_id=document.id,
                     component="classify",
                     operation="llm_classify",
-                    status="success",
-                    sanitized_message=f"LLM: {chosen} via {llm_model}",
-                ))
-        except Exception as e:
-            logger.warning("LLM classification failed: %s", e)
-            events.append(ProcessingEvent(
-                document_id=document.id,
-                component="classify",
-                operation="llm_classify",
-                status="failed",
-                sanitized_message=f"LLM failed: {type(e).__name__}",
-            ))
+                    status="failed",
+                    sanitized_message=f"LLM failed: {type(e).__name__}",
+                )
+            )
 
-    # --- Fallback to heuristic ---
     if chosen is None:
         chosen, confidence, criteria = _heuristic_classify(document, text)
 
-    # Flag manual review for low confidence
+    action_hints = suggest_action(chosen)
     requires_review = confidence < 0.7
     review_reason = None
     if requires_review:
@@ -157,7 +151,6 @@ def classify_document(
         elif confidence < 0.7:
             review_reason = "Classification based on weak signal only"
 
-    # Build decision contract
     decision = ClassificationDecision(
         document_id=document.id,
         allowed_categories=list(CATEGORIES),
@@ -166,18 +159,20 @@ def classify_document(
         criteria_used=criteria,
         requires_manual_review=requires_review,
         manual_review_reason=review_reason,
+        action_hints=action_hints,
     )
 
     summary = _generate_summary(text)
-
-    events.append(ProcessingEvent(
-        document_id=document.id,
-        component="classify",
-        operation="classify",
-        status="success",
-        sanitized_message=(
-            f"- {chosen} (confidence: {confidence:.2f}, method: {method}, review: {requires_review})"
-        ),
-    ))
+    events.append(
+        ProcessingEvent(
+            document_id=document.id,
+            component="classify",
+            operation="classify",
+            status="success",
+            sanitized_message=(
+                f"- {chosen} (confidence: {confidence:.2f}, method: {method}, review: {requires_review})"
+            ),
+        )
+    )
 
     return decision, summary, events
