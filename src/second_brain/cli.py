@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
@@ -213,6 +214,11 @@ def _cmd_suggest(args, config):
     return 0
 
 
+def _cmd_bot(args, config):
+    from .telegram_bot import run_bot
+    return asyncio.run(run_bot(args.token))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="second-brain",
@@ -248,6 +254,9 @@ def main(argv=None):
     p_suggest = sub.add_parser("suggest", help="Suggest category and action for a file")
     p_suggest.add_argument("file", type=str)
 
+    p_bot = sub.add_parser("bot", help="Run the Telegram bot")
+    p_bot.add_argument("--token", type=str, default=None)
+
     args = parser.parse_args(argv)
     config = Config()
     if args.dir:
@@ -264,6 +273,7 @@ def main(argv=None):
         "restore": _cmd_restore,
         "watch": _cmd_watch,
         "suggest": _cmd_suggest,
+        "bot": _cmd_bot,
     }
     return cmd_map[args.command](args, config)
 
