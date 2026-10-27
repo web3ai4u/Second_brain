@@ -1,115 +1,224 @@
-# Second Brain — Personal Knowledge System MVP
+# Second Brain — Telegram Personal Intake Agent
 
-Local-first system for ingesting, classifying and storing digital materials with full data provenance.
+Local-first personal knowledge, file ingestion, classification, and action generation system built around Telegram.
 
-## What It Does
+This project turns Telegram into a practical intake channel for files, notes, and links. You send a text or upload a file, the system validates and stores it locally, extracts content, classifies it by category, and produces a structured recommendation or next action.
 
-Second Brain takes your files and text notes, extracts content, classifies them by category, and stores structured records so that:
+It is designed for real personal workflows:
 
-- Originals are never modified or lost
-- Data provenance is transparent — every classification decision recorded with a contract
-- Data is portable — export to JSON, restore from backup
-- Privacy — everything stored locally, no mandatory external APIs
+- upload PDFs, text files, Markdown, CSV, HTML, JSON, and notes
+- classify content into categories like notes, journal, code, finance, data, reference, and other
+- store provenance and metadata locally in SQLite
+- keep a private, portable knowledge base without requiring a cloud-only workflow
+- generate suggestions, summaries, and business/learning opportunities from the content
+- use Telegram as the front-end for intake and interaction
+
+## What this system does
+
+Second Brain works as a personal knowledge intake agent:
+
+1. Receive a file or text from Telegram
+2. Validate the input and reject unsafe/unsupported content
+3. Compute a SHA-256 hash and track metadata
+4. Store the original locally with provenance
+5. Extract readable text from the document
+6. Classify the content by type and intent
+7. Save the structured record in SQLite
+8. Suggest the next action or category of work
+9. Keep everything local so it can be exported, backed up, or restored
+
+## Telegram-first workflow
+
+The system is meant to be used in a conversational loop:
+
+- Send text to the bot: notes, ideas, meeting summaries, raw thoughts
+- Send a file to the bot: article, PDF, CSV, code, notes, screenshots, or exports
+- The bot validates and stores the item
+- The bot extracts content and classifies it
+- The bot suggests an action: archive, reference, task, article idea, product idea, research note, or next-step list
+- You can later query the stored documents from the bot or from the CLI
+
+This makes the project useful as a personal intake layer, not only as a code exercise.
 
 ## Architecture
 
-Three-layer design:
+The design is intentionally simple and local-first:
 
-1. Layer A (Generation) — LLM via OpenRouter (optional, falls back to heuristic)
-2. Layer B (Decisions) — heuristic classification with decision contract
-3. Layer C (Execution) — SQLite WAL, SHA-256, format validation, size limits
+- Telegram bot handles user interaction
+- CLI provides direct local ingestion and management
+- SQLite stores document metadata, extracted text, events, and process history
+- Heuristic classification handles normal operation without external dependencies
+- Optional LLM analysis can improve categorization or idea generation when an API key is configured
 
-## Quick Start
+## Core components
 
-    git clone https://github.com/web3ai4u/Second_brain.git
-    cd Second_brain
-    python3 -m venv venv
-    venv/bin/pip install pytest python-telegram-bot
-    PYTHONPATH=src python3 -m second_brain ingest myfile.txt
-    PYTHONPATH=src python3 -m second_brain list
+- config.py — runtime configuration, folders, limits, and categories
+- models.py — data contracts for documents, extracted content, and processing events
+- ingest.py — validation, SHA-256 hash, duplicate detection, file security checks
+- extract.py — text extraction for supported formats
+- classify.py — category selection and heuristic logic
+- storage.py — SQLite CRUD, export, restore, backup
+- llm_client.py — optional OpenRouter integration with fallback behavior
+- telegram_bot.py — Telegram interaction layer
+- cli.py — command-line file intake and document management
 
-## CLI Commands
+## Supported formats
 
-    ingest <file>        — validate -> extract -> classify -> save
-    list [--category C]  — list documents with filters
-    show <doc_id>        — show document details
-    export <doc_id>      — export as JSON
-    export-all           — export all documents
-    backup               — create database backup
-    restore <path>       — restore from backup
+The project supports common text-like files such as:
 
-## Telegram Bot
+- txt
+- md
+- markdown
+- rst
+- log
+- csv
+- json
+- yaml
+- yml
+- py
+- js
+- html
+- xml
 
-Send text or files to the bot for instant classification and storage.
+## Quick start
 
-Bot commands:
-    /start  — welcome message
-    /list   — recent documents
-    /stats  — category statistics
-    text    — classified and saved
-    file    — extracted, classified, saved
+Clone the project:
 
-## Classification
+```bash
+git clone https://github.com/web3ai4u/Second_brain.git
+cd Second_brain
+python3 -m venv venv
+source venv/bin/activate
+pip install -U pip
+pip install pytest python-telegram-bot
+```
 
-Two modes, automatic fallback:
+Set the environment if needed:
 
-1. LLM (Layer A) — via OpenRouter free models if OPENROUTER_API_KEY is set
-2. Heuristic (Layer B) — by file extension + keyword matching
-3. Fallback — if LLM fails, heuristic used automatically
+```bash
+cp .env.example .env
+```
 
-Categories: notes, journal, code, finance, data, reference, other
+Then run the CLI:
 
-### LLM Setup (Optional)
+```bash
+PYTHONPATH=src python -m second_brain ingest ./my_note.txt
+PYTHONPATH=src python -m second_brain list
+PYTHONPATH=src python -m second_brain show <doc_id>
+```
 
-1. Get free API key at openrouter.ai
-2. Add to .env: OPENROUTER_API_KEY=your_key
-3. LLM classification used automatically when key is present
+Run the bot:
 
-Why LLM may not work currently:
+```bash
+PYTHONPATH=src python -m second_brain.bot
+```
 
-OpenRouter free models are community-provided and can be:
-- Rate-limited (429 errors during peak usage)
-- Removed or renamed (404 errors — model IDs change frequently)
-- Temporarily unavailable
+Or use the package entrypoint if it is exposed in your environment:
 
-When this happens, the system falls back to heuristic classification.
-You still get results, just with lower confidence (0.6 vs 0.9).
+```bash
+PYTHONPATH=src python -m second_brain
+```
 
-Alternatives to OpenRouter:
-- Ollama on VPS — no API, no limits, needs 2+ GB RAM
-- Groq — fast free tier, 30 req/min
-- Wait — OpenRouter models may stabilize
+## Telegram usage flow
 
-## Supported Formats
+1. Start the bot in Telegram
+2. Send a text prompt or upload a file
+3. The bot validates the input and stores it locally
+4. The system extracts text and classifies the content
+5. The bot returns a result with category, summary, and suggested next action
+6. The content remains available locally for future search, export, and analysis
 
-txt md markdown rst log csv json yaml yml py js html xml
+Typical personal use cases:
+
+- save meeting notes
+- capture research snippets
+- classify invoices and finance documents
+- organize technical notes and code references
+- store content for future learning or product inspiration
+- keep a private archive of personal knowledge assets
+
+## Bot behavior
+
+The intended bot behavior is:
+
+- text input: store the message, classify it, and record a new item
+- file input: validate, ingest, extract, classify, and save locally
+- list requests: show recent or paginated intake records
+- status/provenance checks: expose document metadata, category, and processing status
+- action suggestions: recommend how the material should be organized or used
+
+## Local-first guarantees
+
+This project is intentionally designed to be private and portable:
+
+- no forced cloud dependency for core storage
+- all metadata stays local
+- all processed documents can be exported as JSON
+- database backups and restore flows are supported
+- provenance is retained across processing events
+
+## Example scenario
+
+A user sends a PDF of an article and a text note about a product idea:
+
+- article is ingested, extracted, and classified as reference
+- note is ingested and classified as idea or journal
+- both are stored with timestamps and hashes
+- a later summary can pull both into a broader plan or a personal knowledge view
+- the user can export everything for backup or migration
 
 ## Testing
 
-    PYTHONPATH=src venv/bin/python -m pytest tests/ -v
+Run the project tests with:
 
-32 tests covering: ingestion, extraction, classification, storage, duplicates, audit trail.
+```bash
+PYTHONPATH=src pytest tests/ -v
+```
 
-## Deployment on VPS
+The suite covers:
 
-    systemctl enable second-brain-bot
-    systemctl start second-brain-bot
-    systemctl status second-brain-bot
+- ingestion correctness
+- extraction behavior
+- classification decisions
+- storage persistence and database integrity
+- duplicate detection
+- event auditing
+- backup/restore flows
 
-## Project Structure
+## Project structure
 
-    src/second_brain/
-      config.py         — Config, Limits, categories, keywords
-      models.py         — Document, ExtractedContent, ProcessingEvent
-      ingest.py         — file validation, SHA-256, duplicate detection
-      extract.py        — text extraction (UTF-8 + Latin-1 fallback)
-      classify.py       — heuristic + LLM classification
-      storage.py        — SQLite CRUD, export, backup/restore
-      llm_client.py     — OpenRouter client with model fallback
-      telegram_bot.py   — Telegram bot interface
-      cli.py            — CLI with argparse
-    tests/              — 32 tests
+```text
+src/second_brain/
+  config.py
+  models.py
+  ingest.py
+  extract.py
+  classify.py
+  storage.py
+  llm_client.py
+  telegram_bot.py
+  cli.py
+  __main__.py
+
+tests/
+  test_ingest.py
+  test_extract.py
+  test_classify.py
+  test_storage.py
+```
 
 ## License
 
 MIT
+
+## Why this project matters
+
+The real value is not that it stores files — many tools can do that. The value is in building a personal intake layer that can:
+
+- capture information from real-world sources
+- keep a trusted local record
+- classify content by meaning
+- turn raw material into actionable knowledge
+- give you a simple Telegram interface for daily use
+
+This is a practical foundation for a local personal knowledge base, research archive, or file intake agent.
