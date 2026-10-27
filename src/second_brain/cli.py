@@ -1,59 +1,39 @@
+"""Command-line interface for Second Brain MVP."""
+
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import logging
 import sys
-import time
 from pathlib import Path
 
-from .classify import classify_document, suggest_action
 from .config import Config
-from .extract import ExtractionError, extract_text
 from .ingest import (
     DuplicateFileError,
     EmptyFileError,
     FileTooLargeError,
     IngestError,
+    PathTraversalError,
     UnsupportedFormatError,
     ingest_file,
 )
+from .extract import extract_text, ExtractionError
+from .classify import classify_document
+from .llm_client import LLMClient, ProductInsightAnalyzer
 from .storage import Storage, StorageError
 
 
-logger = logging.getLogger(__name__)
-
-
-def _process_file(file_path: Path, config: Config, storage: Storage) -> dict:
-    doc, ingest_events = ingest_file(file_path, config)
-    doc.processing_status = "processing"
-    storage.save_document(doc)
-    storage.save_events(ingest_events)
-
-    content, extract_events = extract_text(doc, config)
-    doc.extraction_status = "completed"
-    storage.save_extracted_content(content)
-    storage.save_events(extract_events)
-
-    decision, summary, classify_events = classify_document(doc, content)
-    doc.category = decision.chosen_category
-    doc.summary = summary
-    doc.action_hint = "; ".join(decision.action_hints) if decision.action_hints else None
-    doc.processing_status = "completed"
-    from datetime import datetime, timezone
-    doc.processed_at = datetime.now(timezone.utc).isoformat()
-    storage.update_document(doc)
-    storage.save_events(classify_events)
-
-    return {
-        "doc_id": doc.id,
-        "filename": doc.original_filename,
-        "category": doc.category,
-        "action_hint": doc.action_hint,
-        "summary": summary,
-        "confidence": decision.confidence,
-    }
+def _setup_logging(config: Config) -> None:
+    config.ensure_dirs()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(str(config.log_path), encoding="utf-8"),
+            logging.StreamHandler(sys.stderr),
+        ],
+    )
 
 
 def _cmd_ingest(args, config):
@@ -64,7 +44,7 @@ def _cmd_ingest(args, config):
         print(f"Error: file not found: {file_path}", file=sys.stderr)
         return 1
     try:
-        result = _process_file(file_path, config, storage)
+        doc, ingest_events = ingest_file(file_path, config)
     except DuplicateFileError as e:
         print(f"Duplicate detected: {e}", file=sys.stderr)
         return 2
@@ -80,23 +60,44 @@ def _cmd_ingest(args, config):
     except IngestError as e:
         print(f"Ingest error: {e}", file=sys.stderr)
         return 1
+    doc.processing_status = "processing"
+    storage.save_document(doc)
+    storage.save_events(ingest_events)
+    try:
+        content, extract_events = extract_text(doc, config)
     except ExtractionError as e:
+        doc.processing_status = "failed"
+        doc.extraction_status = "failed"
+        storage.update_document(doc)
         print(f"Extraction error: {e}", file=sys.stderr)
         return 1
-
+    doc.extraction_status = "completed"
+    storage.save_extracted_content(content)
+    storage.save_events(extract_events)
+    decision, summary, classify_events = classify_document(doc, content)
+    doc.category = decision.chosen_category
+    doc.summary = summary
+    doc.processing_status = "completed"
+    from datetime import datetime, timezone
+    doc.processed_at = datetime.now(timezone.utc).isoformat()
+    storage.update_document(doc)
+    storage.save_events(classify_events)
     print("Document ingested successfully!")
-    print(f"  ID:       {result['doc_id']}")
-    print(f"  File:     {result['filename']}")
-    print(f"  Category: {result['category']}")
-    print(f"  Action:   {result['action_hint']}")
-    print(f"  Summary:  {result['summary']}")
+    print(f"  ID:       {doc.id}")
+    print(f"  File:     {doc.original_filename}")
+    print(f"  Size:     {doc.file_size} bytes")
+    print(f"  SHA-256:  {doc.sha256[:16]}...")
+    print(f"  Format:   {doc.detected_format}")
+    print(f"  Category: {doc.category} (confidence: {decision.confidence:.2f})")
     return 0
 
 
 def _cmd_list(args, config):
     storage = Storage(config)
     storage.initialize()
-    docs = storage.list_documents(category=args.category, status=args.status, limit=args.limit)
+    docs = storage.list_documents(
+        category=args.category, status=args.status, limit=args.limit,
+    )
     if not docs:
         print("No documents found.")
         return 0
@@ -171,98 +172,68 @@ def _cmd_restore(args, config):
         return 1
 
 
-def _cmd_watch(args, config):
+def _cmd_analyze(args, config):
     storage = Storage(config)
     storage.initialize()
-    inbox = Path(args.directory or config.inbox_dir)
-    inbox.mkdir(parents=True, exist_ok=True)
-    print(f"Watching inbox: {inbox} (ctrl-c to stop)")
-    try:
-        while True:
-            for item in sorted(inbox.iterdir()):
-                if item.is_file() and not item.name.startswith("."):
-                    try:
-                        result = _process_file(item, config, storage)
-                        print(f"Processed {item.name}: {result['category']} -> {result['action_hint']}")
-                    except Exception as exc:
-                        print(f"Skip {item.name}: {exc}", file=sys.stderr)
-                    finally:
-                        try:
-                            item.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-            time.sleep(args.interval)
-    except KeyboardInterrupt:
-        print("\nWatcher stopped.")
-        return 0
-
-
-def _cmd_suggest(args, config):
-    if not args.file:
-        print("Provide a text file or file path to suggest action for.", file=sys.stderr)
+    doc = storage.get_document(args.doc_id)
+    if doc is None:
+        print(f"Document not found: {args.doc_id}", file=sys.stderr)
         return 1
-    text = Path(args.file).read_text(encoding="utf-8", errors="ignore")
-    from .classify import _classify_by_extension, _classify_by_keywords
-    doc = type("D", (), {"original_filename": Path(args.file).name})()
-    cat, _, _ = _classify_by_keywords(text)
-    if cat is None:
-        cat = _classify_by_extension(doc.original_filename) or "other"
-    actions = suggest_action(cat)
-    print(f"Suggested category: {cat}")
-    for action in actions:
-        print(f"- {action}")
+
+    content = storage.get_extracted_content(doc.id)
+    if content is None:
+        print(f"No extracted content found for: {args.doc_id}", file=sys.stderr)
+        return 1
+
+    llm_client = LLMClient()
+    analyzer = ProductInsightAnalyzer(llm_client)
+    insight = analyzer.analyze(content.extracted_text)
+    print(json.dumps({
+        "document_id": doc.id,
+        "topic": insight.topic,
+        "audience": insight.audience,
+        "value_proposition": insight.value_proposition,
+        "course_ideas": insight.course_ideas,
+        "agent_ideas": insight.agent_ideas,
+        "app_ideas": insight.app_ideas,
+        "monetization_ideas": insight.monetization_ideas,
+        "commercial_potential": insight.commercial_potential,
+        "confidence": insight.confidence,
+    }, ensure_ascii=False, indent=2))
     return 0
-
-
-def _cmd_bot(args, config):
-    from .telegram_bot import run_bot
-    return asyncio.run(run_bot(args.token))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="second-brain",
-        description="Local file intake agent for organizing, storing and understanding files.",
+        description="Second Brain - Personal Knowledge System MVP",
     )
-    parser.add_argument("--dir", type=str, default=None, help="Base directory (default: ~/.second-brain)")
+    parser.add_argument(
+        "--dir", type=str, default=None,
+        help="Base directory (default: ~/.second-brain)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
-
-    p_ingest = sub.add_parser("ingest", help="Ingest a single file")
-    p_ingest.add_argument("file", type=str)
-
-    p_list = sub.add_parser("list", help="List stored documents")
+    p_ingest = sub.add_parser("ingest", help="Ingest a file")
+    p_ingest.add_argument("file", type=str, help="Path to file")
+    p_list = sub.add_parser("list", help="List documents")
     p_list.add_argument("--category", type=str, default=None)
     p_list.add_argument("--status", type=str, default=None)
     p_list.add_argument("--limit", type=int, default=50)
-
-    p_show = sub.add_parser("show", help="Show a document")
+    p_show = sub.add_parser("show", help="Show document details")
     p_show.add_argument("doc_id", type=str)
-
-    p_export = sub.add_parser("export", help="Export a document")
+    p_export = sub.add_parser("export", help="Export document as JSON")
     p_export.add_argument("doc_id", type=str)
-
-    sub.add_parser("export-all", help="Export all documents")
-    sub.add_parser("backup", help="Create a database backup")
-
+    sub.add_parser("export-all", help="Export all documents as JSON")
+    sub.add_parser("backup", help="Create database backup")
     p_restore = sub.add_parser("restore", help="Restore from backup")
     p_restore.add_argument("backup_path", type=str)
-
-    p_watch = sub.add_parser("watch", help="Watch an inbox folder and process incoming files")
-    p_watch.add_argument("directory", type=str, nargs="?", default=None)
-    p_watch.add_argument("--interval", type=float, default=2.0)
-
-    p_suggest = sub.add_parser("suggest", help="Suggest category and action for a file")
-    p_suggest.add_argument("file", type=str)
-
-    p_bot = sub.add_parser("bot", help="Run the Telegram bot")
-    p_bot.add_argument("--token", type=str, default=None)
-
+    p_analyze = sub.add_parser("analyze", help="Analyze a document for products, courses, agents, and monetization ideas")
+    p_analyze.add_argument("doc_id", type=str)
     args = parser.parse_args(argv)
     config = Config()
     if args.dir:
         config = Config(base_dir=Path(args.dir))
-    config.ensure_dirs()
-
+    _setup_logging(config)
     cmd_map = {
         "ingest": _cmd_ingest,
         "list": _cmd_list,
@@ -271,11 +242,10 @@ def main(argv=None):
         "export-all": _cmd_export_all,
         "backup": _cmd_backup,
         "restore": _cmd_restore,
-        "watch": _cmd_watch,
-        "suggest": _cmd_suggest,
-        "bot": _cmd_bot,
+        "analyze": _cmd_analyze,
     }
-    return cmd_map[args.command](args, config)
+    handler = cmd_map[args.command]
+    return handler(args, config)
 
 
 if __name__ == "__main__":
